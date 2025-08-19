@@ -85,17 +85,20 @@ class FileCLI(cmd.Cmd):
     def do_calc_maps(self, arg):
         try:
             args = shlex.split(arg)
-            height = int(args[0])
-            width = int(args[1])
-            focus = int(args[2])
+
+            points, path = self._get_points(arg[0])
+
+            height = int(args[1])
+            width = int(args[2])
+            focus = int(args[3])
             fx = focus 
             fy = focus
             cx = width/2
             cy = height/2        
-            num_in_row = np.shape(self.data)[1]
+            num_in_row = np.shape(points)[1]
             depth_map = np.full((height, width), np.inf)
             reflect_map = np.full((height, width), np.inf)
-            for iterator, row in enumerate(self.data):
+            for iterator, row in enumerate(points):
                 
                 if num_in_row==4:
                     xpt, ypt, zpt, r = row[:4] 
@@ -135,9 +138,29 @@ class FileCLI(cmd.Cmd):
                 reflect_map[np.isinf(reflect_map)] = 0  
                 reflect_map[np.isnan(reflect_map)] = 0  
                 self.reflect_visual = np.copy(255 * reflect_map / np.max(reflect_map))
+
+            name = str(Path(path).name)
+            # Сохранение в истории
+            self.image_history["DEPTH_MAP_"+name] = depth_map
+            self.current_image = depth_map
+            self.current_path = "DEPTH_MAP_"+name
+            image_size = np.shape(depth_map)
+            self.file_history.append("DEPTH_MAP_"+name)
+            print("DEPTH_MAP_"+name+f"  Размер: {image_size[0]}x{image_size[1]}")
+
+            if num_in_row==4:
+                # Сохранение в истории
+                self.image_history["REFLECT_MAP_"+name] = reflect_map
+                self.current_image = reflect_map
+                self.current_path = "REFLECT_MAP_"+name
+                image_size = np.shape(depth_map)
+                self.file_history.append("REFLECT_MAP_"+name)
+                print("REFLECT_MAP_"+name+f"  Размер: {image_size[0]}x{image_size[1]}")
+
         except Exception as e:
             print(e)
-                
+
+    '''         
     def do_show_depthmap(self, arg):
         plt.imshow(self.depth_visual)
         plt.show()
@@ -145,6 +168,7 @@ class FileCLI(cmd.Cmd):
     def do_show_reflectmap(self, arg):
         plt.imshow(self.reflect_visual)
         plt.show()
+    '''
 
     def do_histpoints(self, arg):
             """Показать историю загруженных файлов точек: histpoints"""
@@ -214,14 +238,17 @@ class FileCLI(cmd.Cmd):
         except Exception as e:
             print("Загрузите изображение")
 
-    def do_detect_imgage(self, arg):
+    def do_detect_tag(self, arg):
         try:
+            args = shlex.split(arg)
+            image = self._get_image(args[0])
 
-            if not arg:
+            if len(args)==1:
                 tag_families = 'tag16h5'
             else:
-                tag_families = arg[0]
+                tag_families = args[1]
 
+            
             print("tag families:", tag_families)
             detector = Detector(
                 families=tag_families,  # Тип меток (по умолчанию)
@@ -232,11 +259,19 @@ class FileCLI(cmd.Cmd):
                 refine_edges=0.1        # Точность определения границ
             )
 
-            self.gray = cv2.cvtColor(self.image, cv2.COLOR_BGR2GRAY)
-            self.tags_on_image = np.copy(self.image)
-            self.tags_corners = self._getTagPositionInFrame(detector, self.gray, self.tags_on_image)
+            if len(image.shape) == 3 and image.shape[2] == 3:
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = image.astype(np.uint8)
+                image = self._safe_convert_gray_to_bgr(image)
+                #///image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 
-            plt.imshow(self.tags_on_image)
+            tags_on_image = np.copy(image)
+
+            # TODO: use tags_corners
+            tags_corners = self._getTagPositionInFrame(detector, gray, tags_on_image)
+
+            plt.imshow(tags_on_image)
             plt.show()
             
         
@@ -489,13 +524,78 @@ class FileCLI(cmd.Cmd):
                 return
         except ValueError:
             # Использование как путь
-            path = str(Path(arg).expanduser().absolute())
+            if not arg.endswith(".txt"):
+                path = str(Path(arg).expanduser().absolute())
+            else:
+                path = arg 
+
             if path not in self.image_history:
                 print(f"Ошибка: Изображение не найдено в истории")
                 return
             img = self.image_history[path]
         
         return img
+    
+    def _get_points(self, arg):
+        """Получить облако точек: [индекс|путь]"""
+        if not arg:
+            self._list_images()
+            return
+        points = []
+        try:
+            # Попытка использовать как индекс
+            index = int(arg) - 1
+            if 0 <= index < len(self.points_history):
+                path = list(self.points_history.keys())[index]
+                points = self.points_history[path]
+            else:
+                print("Ошибка: Неверный индекс")
+                return
+        except ValueError:
+            # Использование как путь
+            path = str(Path(arg).expanduser().absolute())
+            if path not in self.points_history:
+                print(f"Ошибка: Облако точек не найдено в истории")
+                return
+            points = self.points_history[path]
+        
+        return points, path
+
+
+    def _safe_convert_gray_to_bgr(self, image):
+        """
+        Безопасное преобразование grayscale в BGR с обработкой разных типов данных
+        """
+        if image is None:
+            return None
+        
+        # Проверяем тип данных
+        if image.dtype == np.float64:
+            # Преобразуем 64-bit float в 8-bit
+            # Нормализуем к диапазону [0, 255]
+            if image.max() <= 1.0:  # если значения в [0, 1]
+                image_8bit = (image * 255).astype(np.uint8)
+            else:
+                image_8bit = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            
+            return cv2.cvtColor(image_8bit, cv2.COLOR_GRAY2BGR)
+        
+        elif image.dtype == np.float32:
+            # 32-bit float
+            if image.max() <= 1.0:
+                image_8bit = (image * 255).astype(np.uint8)
+            else:
+                image_8bit = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            return cv2.cvtColor(image_8bit, cv2.COLOR_GRAY2BGR)
+        
+        else:
+            # Для других типов (uint8, uint16) пробуем прямое преобразование
+            try:
+                return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            except cv2.error:
+                # Если не получается, нормализуем и преобразуем
+                image_normalized = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                return cv2.cvtColor(image_normalized, cv2.COLOR_GRAY2BGR)
 
     # Синонимы
     do_quit = do_exit
