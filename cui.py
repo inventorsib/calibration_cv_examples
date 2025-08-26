@@ -11,6 +11,9 @@ from matplotlib import pyplot as plt
 import cv2
 from pyapriltags import Detector
 
+from scipy.spatial import KDTree
+import numpy as np
+
 colors = [
     (255, 0, 0),      # Красный
     (0, 255, 0),      # Зеленый
@@ -86,11 +89,16 @@ class FileCLI(cmd.Cmd):
         try:
             args = shlex.split(arg)
 
-            points, path = self._get_points(arg[0])
+            points, path = self._get_points(args[0])
 
             height = int(args[1])
             width = int(args[2])
             focus = int(args[3])
+
+
+            k = int(args[4])
+            max_dist = int(args[5])
+
             fx = focus 
             fy = focus
             cx = width/2
@@ -133,11 +141,13 @@ class FileCLI(cmd.Cmd):
             depth_map[np.isinf(depth_map)] = 0  
             depth_map[np.isnan(depth_map)] = 0  
             self.depth_visual = np.copy(255 * depth_map / np.max(depth_map))
+            depth_map = self.fill_depth_gaps_kdtree(depth_map, k, max_dist)
 
             if num_in_row==4:
                 reflect_map[np.isinf(reflect_map)] = 0  
                 reflect_map[np.isnan(reflect_map)] = 0  
                 self.reflect_visual = np.copy(255 * reflect_map / np.max(reflect_map))
+                reflect_map = self.fill_depth_gaps_kdtree(reflect_map, k, max_dist)
 
             name = str(Path(path).name)
             # Сохранение в истории
@@ -160,15 +170,6 @@ class FileCLI(cmd.Cmd):
         except Exception as e:
             print(e)
 
-    '''         
-    def do_show_depthmap(self, arg):
-        plt.imshow(self.depth_visual)
-        plt.show()
-
-    def do_show_reflectmap(self, arg):
-        plt.imshow(self.reflect_visual)
-        plt.show()
-    '''
 
     def do_histpoints(self, arg):
             """Показать историю загруженных файлов точек: histpoints"""
@@ -596,6 +597,45 @@ class FileCLI(cmd.Cmd):
                 # Если не получается, нормализуем и преобразуем
                 image_normalized = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
                 return cv2.cvtColor(image_normalized, cv2.COLOR_GRAY2BGR)
+
+    def fill_depth_gaps_kdtree(self, depth_map, k=5, max_distance=10):
+
+        # Создаем маску пропусков
+        mask = (depth_map == 0) | np.isnan(depth_map)
+        
+        # Координаты известных точек
+        known_y, known_x = np.where(~mask)
+        known_points = np.column_stack((known_y, known_x))
+        known_values = depth_map[~mask]
+        
+        # Координаты пропущенных точек
+        unknown_y, unknown_x = np.where(mask)
+        unknown_points = np.column_stack((unknown_y, unknown_x))
+        
+        if len(unknown_points) == 0:
+            return depth_map
+        
+        # Создаем KDTree
+        tree = KDTree(known_points)
+        
+        # Заполняем пропуски
+        filled_depth = depth_map.copy()
+        
+        for i, point in enumerate(unknown_points):
+            # Находим k ближайших соседей
+            distances, indices = tree.query(point, k=min(k, len(known_points)))
+            
+            # Фильтруем по максимальному расстоянию
+            valid = distances < max_distance
+            if np.any(valid):
+                # Взвешиваем по обратному расстоянию
+                weights = 1.0 / (distances[valid] + 1e-8)
+                weights /= np.sum(weights)
+                
+                y, x = unknown_y[i], unknown_x[i]
+                filled_depth[y, x] = np.sum(weights * known_values[indices[valid]])
+        
+        return filled_depth
 
     # Синонимы
     do_quit = do_exit
